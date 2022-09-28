@@ -131,13 +131,16 @@ impl Future for SnowflakeGenLoop {
         let mut state = state_clone.lock().unwrap();
 
         state.waker = Some(cx.waker().clone());
-        cx.waker().clone().wake();
 
         let inner_state_clone = state.inner_state.clone();
         let mut inner_state = inner_state_clone.lock().unwrap();
         let time_sum = inner_state.time_sum();
 
         if inner_state.incr >= INCR_MAX {
+            let len = state.len.load(Ordering::Acquire);
+            if len > 0 {
+                cx.waker().clone().wake();
+            }
             return Poll::Pending;
         }
 
@@ -159,6 +162,9 @@ impl Future for SnowflakeGenLoop {
             }
         }
 
+        if state.len.load(Ordering::Acquire) > 0 {
+            cx.waker().clone().wake();
+        }
         Poll::Pending
     }
 }
@@ -174,9 +180,10 @@ struct Snowflake {
 
 impl Snowflake {
     fn gen(gen: &mut SnowflakeGen) -> Self {
+        let gen_state = gen.state.lock().unwrap();
+
         let len = gen.len.load(Ordering::Acquire);
         if len == 0 {
-            let gen_state = gen.state.lock().unwrap();
             let mut inner_state = gen_state.inner_state.lock().unwrap();
             let time_sum = inner_state.time_sum();
 
@@ -196,6 +203,11 @@ impl Snowflake {
             waker: None
         }));
         gen.tx.send(state.clone()).unwrap();
+        gen.len.fetch_add(1, Ordering::AcqRel);
+        if let Some(waker) = &gen_state.waker {
+            let waker_clone = waker.clone();
+            waker_clone.wake();
+        }
         Self { state: state.clone() }
     }
 }
